@@ -133,26 +133,15 @@ jobs:
             echo "::warning::BuildKit container is not running; peak memory is unavailable."
             echo "BuildKit peak memory unavailable: builder not running." >> "$GITHUB_STEP_SUMMARY"
           fi
+          df -h /
           used=$(df -B1 --output=used / | tail -n 1 | tr -d ' ')
           if [[ -n "${DISK_BASELINE_USED_BYTES:-}" ]]; then
-            delta="$(numfmt --to=iec-i --suffix=B $(( used - DISK_BASELINE_USED_BYTES )))"
+            delta="$(numfmt --to=iec-i --suffix=B -- $(( used - DISK_BASELINE_USED_BYTES )))"
           else
             delta="unknown (no baseline)"
           fi
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Additional disk used on / since before checkout, after Docker build: **${delta}**" | tee -a "$GITHUB_STEP_SUMMARY"
-      - &report-final-disk
-        name: Report disk at end of job
-        if: always()
-        run: |
-          set -euo pipefail
-          used=$(df -B1 --output=used / | tail -n 1 | tr -d ' ')
-          if [[ -n "${DISK_BASELINE_USED_BYTES:-}" ]]; then
-            delta="$(numfmt --to=iec-i --suffix=B $(( used - DISK_BASELINE_USED_BYTES )))"
-          else
-            delta="unknown (no baseline)"
-          fi
-          echo "Additional disk used on / since before checkout, at end of job steps: **${delta}**" | tee -a "$GITHUB_STEP_SUMMARY"
 
   posthog-node:
     # Dockerfile.node is based on ghcr.io/posthog/rust-node-container; repoint it at our build.
@@ -196,7 +185,6 @@ jobs:
             ${{ needs.prepare.outputs.registry }}/posthog-node:latest
             ${{ needs.prepare.outputs.registry }}/posthog-node:sha-${{ needs.prepare.outputs.short }}
       - *report-build-resources
-      - *report-final-disk
 
   posthog:
     needs: prepare
@@ -265,9 +253,7 @@ jobs:
         if: always()
         run: |
           free -h
-          df -h /
           sudo dmesg --ctime | tail -n 60
-      - *report-final-disk
 
   rust:
     # Mirrors the entries for these images in .github/rust-images.yml.
@@ -319,7 +305,6 @@ jobs:
           cache-from: type=gha,scope=rust-${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=rust-${{ matrix.image }}
       - *report-build-resources
-      - *report-final-disk
 
   livestream:
     needs: prepare
@@ -352,7 +337,6 @@ jobs:
           cache-from: type=gha,scope=livestream
           cache-to: type=gha,mode=max,scope=livestream
       - *report-build-resources
-      - *report-final-disk
 
   summary:
     needs: [prepare, rust-node-container, posthog-node, posthog, rust, livestream]

@@ -41,8 +41,8 @@ branch. This keeps fork automation separate from upstream data, so syncing never
   and `memory.swap.peak`, when supported by the runner kernel, in the logs and job summary.
   These are separate lifetime peaks, not simultaneous usage or a minimum memory requirement.
   Each image job records disk used on `/` right before checkout (after disk cleanup and, for `posthog`, after
-  the swap file is created). It then reports how much additional disk the job used after the Docker build and at
-  the end of the job steps. These are point-in-time deltas, not peak usage; no background monitor is used.
+  the swap file is created). The Docker build resource report shows free disk and the additional disk used
+  since that baseline after the build. This is a point-in-time delta, not peak usage; no background monitor is used.
   Reports run even after build failures, but memory counters are unavailable if the builder has stopped.
   Set `posthog_only=true` to retry just that image, using `posthog_ref` to pin the original source commit.
 
