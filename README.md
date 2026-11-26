@@ -37,6 +37,12 @@ branch. This keeps fork automation separate from upstream data, so syncing never
   at least 64 GiB for the build. The private runner's earlier swap retry exhausted its much smaller disk.
   `/mnt` shares the root filesystem on the observed runner, so moving files there would not add capacity.
   Final resource and kernel logs help distinguish memory exhaustion from disk exhaustion on future retries.
+  Every image build reports the BuildKit container's cgroup v2 `memory.peak` (RAM, including charged cache)
+  and `memory.swap.peak`, when supported by the runner kernel, in the logs and job summary.
+  These are separate lifetime peaks, not simultaneous usage or a minimum memory requirement.
+  Disk snapshots are recorded after the Docker build and at the end of job steps, before automatic action
+  cleanup. These are point-in-time filesystem usage, not peak disk usage; no background monitor is used.
+  Reports run even after build failures, but memory counters are unavailable if the builder has stopped.
   Set `posthog_only=true` to retry just that image, using `posthog_ref` to pin the original source commit.
 
 ## Secret

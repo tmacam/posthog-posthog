@@ -79,6 +79,7 @@ jobs:
           echo "image=${REGISTRY}/rust-node-container:bookworm_rust_${rust}-node_${node}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+        id: buildx
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -93,6 +94,56 @@ jobs:
           tags: ${{ steps.meta.outputs.image }}
           cache-from: type=gha,scope=rust-node-container
           cache-to: type=gha,mode=max,scope=rust-node-container
+      - &report-build-resources
+        name: Report Docker build peak memory and disk
+        if: always()
+        env:
+          BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          set -euo pipefail
+          echo "### Docker build resources" >> "$GITHUB_STEP_SUMMARY"
+          container="buildx_buildkit_${BUILDER}0"
+          if [[ -n "$BUILDER" ]] && pid=$(docker inspect --format '{{.State.Pid}}' "$container") && (( pid > 0 )); then
+            cgroup=$(awk -F: '$1 == "0" {print $3}' "/proc/${pid}/cgroup")
+            if [[ -n "$cgroup" ]]; then
+              {
+                echo "| BuildKit cgroup metric | Bytes | Human-readable |"
+                echo "|---|---:|---:|"
+              } >> "$GITHUB_STEP_SUMMARY"
+              for metric in memory.peak memory.swap.peak; do
+                if bytes=$(sudo cat "/sys/fs/cgroup${cgroup}/${metric}"); then
+                  echo "| \`${metric}\` | ${bytes} | $(numfmt --to=iec-i --suffix=B "$bytes") |" | tee -a "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "::warning::BuildKit ${metric} is unavailable on this runner."
+                  echo "| \`${metric}\` | Unavailable | Unavailable |" >> "$GITHUB_STEP_SUMMARY"
+                fi
+              done
+            else
+              echo "::warning::BuildKit cgroup v2 path is unavailable."
+              echo "BuildKit peak memory unavailable: no cgroup v2 path." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "::warning::BuildKit container is not running; peak memory is unavailable."
+            echo "BuildKit peak memory unavailable: builder not running." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo ""
+            echo "Disk snapshot after Docker build (not peak usage):"
+            echo '```text'
+            df -hT / /mnt
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - &report-final-disk
+        name: Report disk at end of job
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### Disk at end of job steps (before automatic action cleanup)"
+            echo '```text'
+            df -hT / /mnt
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   posthog-node:
     # Dockerfile.node is based on ghcr.io/posthog/rust-node-container; repoint it at our build.
@@ -118,6 +169,7 @@ jobs:
           grep -q "^FROM ${BASE_IMAGE}" Dockerfile.node
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+        id: buildx
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -133,6 +185,8 @@ jobs:
           tags: |
             ${{ needs.prepare.outputs.registry }}/posthog-node:latest
             ${{ needs.prepare.outputs.registry }}/posthog-node:sha-${{ needs.prepare.outputs.short }}
+      - *report-build-resources
+      - *report-final-disk
 
   posthog:
     needs: prepare
@@ -169,6 +223,7 @@ jobs:
           persist-credentials: false
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+        id: buildx
         with:
           buildkitd-config-inline: |
             [worker.oci]
@@ -194,12 +249,14 @@ jobs:
           tags: |
             ${{ needs.prepare.outputs.registry }}/posthog:latest
             ${{ needs.prepare.outputs.registry }}/posthog:sha-${{ needs.prepare.outputs.short }}
+      - *report-build-resources
       - name: Report final build resources
         if: always()
         run: |
           free -h
           df -h /
           sudo dmesg --ctime | tail -n 60
+      - *report-final-disk
 
   rust:
     # Mirrors the entries for these images in .github/rust-images.yml.
@@ -226,6 +283,7 @@ jobs:
           persist-credentials: false
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+        id: buildx
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -245,6 +303,8 @@ jobs:
             ${{ needs.prepare.outputs.registry }}/${{ matrix.image }}:sha-${{ needs.prepare.outputs.short }}
           cache-from: type=gha,scope=rust-${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=rust-${{ matrix.image }}
+      - *report-build-resources
+      - *report-final-disk
 
   livestream:
     needs: prepare
@@ -259,6 +319,7 @@ jobs:
           persist-credentials: false
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+        id: buildx
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -274,6 +335,8 @@ jobs:
             ${{ needs.prepare.outputs.registry }}/livestream:sha-${{ needs.prepare.outputs.short }}
           cache-from: type=gha,scope=livestream
           cache-to: type=gha,mode=max,scope=livestream
+      - *report-build-resources
+      - *report-final-disk
 
   summary:
     needs: [prepare, rust-node-container, posthog-node, posthog, rust, livestream]
