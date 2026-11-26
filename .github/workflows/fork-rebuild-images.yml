@@ -63,6 +63,13 @@ jobs:
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
+      - &record-disk-baseline
+        name: Record disk usage baseline
+        run: |
+          set -euo pipefail
+          used=$(df -B1 --output=used / | tail -n 1 | tr -d ' ')
+          echo "DISK_BASELINE_USED_BYTES=${used}" >> "$GITHUB_ENV"
+          echo "Disk used on / before checkout: $(numfmt --to=iec-i --suffix=B "$used")"
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.RNC_REPO }}
@@ -126,24 +133,26 @@ jobs:
             echo "::warning::BuildKit container is not running; peak memory is unavailable."
             echo "BuildKit peak memory unavailable: builder not running." >> "$GITHUB_STEP_SUMMARY"
           fi
-          {
-            echo ""
-            echo "Disk snapshot after Docker build (not peak usage):"
-            echo '```text'
-            df -hT / /mnt
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          used=$(df -B1 --output=used / | tail -n 1 | tr -d ' ')
+          if [[ -n "${DISK_BASELINE_USED_BYTES:-}" ]]; then
+            delta="$(numfmt --to=iec-i --suffix=B $(( used - DISK_BASELINE_USED_BYTES )))"
+          else
+            delta="unknown (no baseline)"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Additional disk used on / since before checkout, after Docker build: **${delta}**" | tee -a "$GITHUB_STEP_SUMMARY"
       - &report-final-disk
         name: Report disk at end of job
         if: always()
         run: |
           set -euo pipefail
-          {
-            echo "### Disk at end of job steps (before automatic action cleanup)"
-            echo '```text'
-            df -hT / /mnt
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          used=$(df -B1 --output=used / | tail -n 1 | tr -d ' ')
+          if [[ -n "${DISK_BASELINE_USED_BYTES:-}" ]]; then
+            delta="$(numfmt --to=iec-i --suffix=B $(( used - DISK_BASELINE_USED_BYTES )))"
+          else
+            delta="unknown (no baseline)"
+          fi
+          echo "Additional disk used on / since before checkout, at end of job steps: **${delta}**" | tee -a "$GITHUB_STEP_SUMMARY"
 
   posthog-node:
     # Dockerfile.node is based on ghcr.io/posthog/rust-node-container; repoint it at our build.
@@ -155,6 +164,7 @@ jobs:
       - uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
+      - *record-disk-baseline
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -217,6 +227,7 @@ jobs:
           sudo swapon /posthog-build.swap
           free -h
           df -h /
+      - *record-disk-baseline
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -277,6 +288,7 @@ jobs:
       - uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
+      - *record-disk-baseline
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -315,6 +327,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - *record-disk-baseline
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}
