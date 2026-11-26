@@ -1,0 +1,93 @@
+name: Sync main from upstream
+
+# Fast-forwards this fork's mirror branch to the upstream branch.
+# The mirror branch must never carry fork-only commits; those live on fork-ops.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * *'
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: fork-sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: PostHog/posthog
+  UPSTREAM_BRANCH: master
+  FORK_BRANCH: main
+  # Our own workflows; anything else that gets registered by a mirror push is disabled.
+  ALLOWED_WORKFLOWS: fork-sync-upstream.yml fork-rebuild-images.yml
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check upstream relationship
+        id: compare
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          fork_sha=$(gh api "repos/${GITHUB_REPOSITORY}/branches/${FORK_BRANCH}" --jq .commit.sha)
+          upstream_sha=$(gh api "repos/${UPSTREAM_REPO}/branches/${UPSTREAM_BRANCH}" --jq .commit.sha)
+          echo "fork=${fork_sha} upstream=${upstream_sha}"
+          if [ "$fork_sha" = "$upstream_sha" ]; then
+            echo "status=identical" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 404 here means the fork tip is not in upstream history (fork-only commits on the mirror).
+          status=$(gh api "repos/${UPSTREAM_REPO}/compare/${fork_sha}...${upstream_sha}" --jq .status || echo unknown)
+          ahead=$(gh api "repos/${UPSTREAM_REPO}/compare/${fork_sha}...${upstream_sha}" --jq .ahead_by || echo 0)
+          echo "compare status=${status} ahead_by=${ahead}"
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          echo "ahead=${ahead}" >> "$GITHUB_OUTPUT"
+          if [ "$status" != "ahead" ]; then
+            echo "::error::${FORK_BRANCH} cannot be fast-forwarded to ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} (status=${status})."
+            exit 1
+          fi
+
+      - name: Fast-forward mirror branch
+        if: steps.compare.outputs.status == 'ahead'
+        env:
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          UPSTREAM_SHA: ${{ steps.compare.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          git init -q mirror && cd mirror
+          git remote add origin "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          # Shallow tip of the fork is enough: the upstream fetch stops at it because it is an ancestor.
+          git fetch --no-tags --depth=1 origin "refs/heads/${FORK_BRANCH}:refs/remotes/origin/${FORK_BRANCH}"
+          git fetch --no-tags upstream "refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          git merge-base --is-ancestor "origin/${FORK_BRANCH}" "$UPSTREAM_SHA"
+          git push origin "${UPSTREAM_SHA}:refs/heads/${FORK_BRANCH}"
+          echo "Fast-forwarded ${FORK_BRANCH} by ${{ steps.compare.outputs.ahead }} commit(s) to ${UPSTREAM_SHA}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Neutralize upstream workflows triggered by the mirror push
+        if: always() && steps.compare.outputs.status == 'ahead'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sleep 20
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/workflows" --jq '.workflows[] | select(.state=="active") | "\(.id) \(.path)"' |
+          while read -r id path; do
+            name=$(basename "$path")
+            if ! printf ' %s ' $ALLOWED_WORKFLOWS | grep -q " ${name} "; then
+              echo "Disabling ${path}"
+              gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${id}/disable" || true
+            fi
+          done
+          for s in queued in_progress waiting pending requested; do
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs?branch=${FORK_BRANCH}&event=push&status=${s}" --jq '.workflow_runs[].id' |
+            while read -r run; do
+              echo "Cancelling run ${run}"
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/cancel" || true
+            done
+          done

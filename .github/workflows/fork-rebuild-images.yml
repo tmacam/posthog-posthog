@@ -1,0 +1,258 @@
+name: Rebuild cascade PostHog images
+
+# Rebuilds every image cascade's self-hosted PostHog uses
+# (deployment/ev2/cascade.posthog/images.lock.json) from this fork's mirror branches.
+# Proof of concept only: amd64 builds on standard hosted runners, pushed to this repo's ghcr namespace.
+on:
+  workflow_dispatch:
+    inputs:
+      posthog_ref:
+        description: Ref of this repo to build from (mirror of PostHog/posthog master)
+        default: main
+      rust_node_container_ref:
+        description: Ref of the rust-node-container fork to build the posthog-node base image from
+        default: main
+      platforms:
+        description: Target platforms (multi-arch uses QEMU and is very slow)
+        default: linux/amd64
+      push:
+        description: Push images to ghcr.io
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fork-rebuild-images
+  cancel-in-progress: false
+
+env:
+  RNC_REPO: tmacam/posthog-rust-node-container
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      short: ${{ steps.resolve.outputs.short }}
+      registry: ${{ steps.resolve.outputs.registry }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.posthog_ref }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${REF}" --jq .sha)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "short=${sha:0:7}" >> "$GITHUB_OUTPUT"
+          echo "registry=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "Building PostHog/posthog @ ${sha}" >> "$GITHUB_STEP_SUMMARY"
+
+  rust-node-container:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.RNC_REPO }}
+          ref: ${{ inputs.rust_node_container_ref }}
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          persist-credentials: false
+      - id: meta
+        env:
+          REGISTRY: ${{ needs.prepare.outputs.registry }}
+        run: |
+          set -euo pipefail
+          rust=$(grep -E '^[[:space:]]*RUST_VERSION=' Dockerfile | head -1 | cut -d'=' -f2)
+          node=$(grep -E '^ENV NODE_VERSION=' Dockerfile | head -1 | cut -d'=' -f2)
+          echo "image=${REGISTRY}/rust-node-container:bookworm_rust_${rust}-node_${node}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          build-args: DEBIAN_SUITE=bookworm
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha,scope=rust-node-container
+          cache-to: type=gha,mode=max,scope=rust-node-container
+
+  posthog-node:
+    # Dockerfile.node is based on ghcr.io/posthog/rust-node-container; repoint it at our build.
+    needs: [prepare, rust-node-container]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - name: Repoint base image
+        env:
+          BASE_IMAGE: ${{ needs.rust-node-container.outputs.image }}
+        run: |
+          set -euo pipefail
+          sed -i -E "s#^FROM ghcr\.io/posthog/rust-node-container:[^ ]+#FROM ${BASE_IMAGE}#" Dockerfile.node
+          grep -n '^FROM' Dockerfile.node
+          grep -q "^FROM ${BASE_IMAGE}" Dockerfile.node
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.node
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          build-args: COMMIT_HASH=${{ needs.prepare.outputs.sha }}
+          tags: |
+            ${{ needs.prepare.outputs.registry }}/posthog-node:latest
+            ${{ needs.prepare.outputs.registry }}/posthog-node:sha-${{ needs.prepare.outputs.short }}
+
+  posthog:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          # No sourcemaps upload secret is provided, so the Dockerfile skips the upload stage.
+          build-args: |
+            COMMIT_HASH=${{ needs.prepare.outputs.sha }}
+            GITHUB_ACTIONS=true
+            GITHUB_SHA=${{ needs.prepare.outputs.sha }}
+            GITHUB_REPOSITORY=PostHog/posthog
+            GITHUB_SERVER_URL=https://github.com
+          tags: |
+            ${{ needs.prepare.outputs.registry }}/posthog:latest
+            ${{ needs.prepare.outputs.registry }}/posthog:sha-${{ needs.prepare.outputs.short }}
+
+  rust:
+    # Mirrors the entries for these images in .github/rust-images.yml.
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: capture
+          - image: property-defs-rs
+          - image: feature-flags
+            sqlx_databases: persons behavioral-cohorts
+          - image: hypercache-server
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./rust/
+          file: ./rust/Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          build-args: |
+            BIN=${{ matrix.image }}
+            SQLX_DATABASES=${{ matrix.sqlx_databases || '' }}
+          tags: |
+            ${{ needs.prepare.outputs.registry }}/${{ matrix.image }}:master
+            ${{ needs.prepare.outputs.registry }}/${{ matrix.image }}:sha-${{ needs.prepare.outputs.short }}
+          cache-from: type=gha,scope=rust-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=rust-${{ matrix.image }}
+
+  livestream:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          sparse-checkout: livestream
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./livestream/
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: |
+            ${{ needs.prepare.outputs.registry }}/livestream:master
+            ${{ needs.prepare.outputs.registry }}/livestream:sha-${{ needs.prepare.outputs.short }}
+          cache-from: type=gha,scope=livestream
+          cache-to: type=gha,mode=max,scope=livestream
+
+  summary:
+    needs: [prepare, rust-node-container, posthog-node, posthog, rust, livestream]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          R: ${{ needs.prepare.outputs.registry }}
+          S: ${{ needs.prepare.outputs.short }}
+        run: |
+          {
+            echo "| Job | Result |"
+            echo "|---|---|"
+            echo "| rust-node-container | ${{ needs.rust-node-container.result }} |"
+            echo "| posthog-node | ${{ needs.posthog-node.result }} |"
+            echo "| posthog | ${{ needs.posthog.result }} |"
+            echo "| rust (capture, property-defs-rs, feature-flags, hypercache-server) | ${{ needs.rust.result }} |"
+            echo "| livestream | ${{ needs.livestream.result }} |"
+            echo ""
+            echo "Images: \`${R}/<name>:sha-${S}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
