@@ -281,6 +281,9 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
+      # Mirrors upstream _rust-build-images.yml: the crates expect PROTO_ROOT=../proto inside the ./rust context.
+      - name: Copy proto files into rust build context
+        run: cp -r proto rust/proto
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
         id: buildx
