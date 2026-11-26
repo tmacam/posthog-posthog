@@ -149,6 +149,20 @@ jobs:
           free -h
           df -hT / /mnt
           docker info --format 'Docker root directory: {{ .DockerRootDir }}'
+      - name: Add swap with a disk-space guard
+        run: |
+          set -euo pipefail
+          available_kib=$(df -Pk / | awk 'NR == 2 {print $4}')
+          if (( available_kib < 80 * 1024 * 1024 )); then
+            echo "::error::At least 80 GiB of free disk is required before allocating 16 GiB of swap."
+            exit 1
+          fi
+          sudo fallocate -l 16G /posthog-build.swap
+          sudo chmod 600 /posthog-build.swap
+          sudo mkswap /posthog-build.swap
+          sudo swapon /posthog-build.swap
+          free -h
+          df -h /
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}
@@ -180,6 +194,12 @@ jobs:
           tags: |
             ${{ needs.prepare.outputs.registry }}/posthog:latest
             ${{ needs.prepare.outputs.registry }}/posthog:sha-${{ needs.prepare.outputs.short }}
+      - name: Report final build resources
+        if: always()
+        run: |
+          free -h
+          df -h /
+          sudo dmesg --ctime | tail -n 60
 
   rust:
     # Mirrors the entries for these images in .github/rust-images.yml.

@@ -32,8 +32,11 @@ branch. This keeps fork automation separate from upstream data, so syncing never
   Default is amd64 only on standard hosted runners. Upstream builds multi-arch on Depot.
   This repository is public to use the larger standard public-repository runners (4 vCPU, 16 GB RAM).
   The main PostHog build serializes BuildKit stages and reports runner resources after disk cleanup.
-  It no longer allocates 16 GiB of swap on the root disk: the previous retry exhausted disk space.
-  Moving swap or Docker storage to `/mnt` would only help if it is a separate disk with sufficient capacity.
+  The public runner still exhausted memory with 15 GiB RAM and no swap, but reported 121 GiB of free disk.
+  The build now adds 16 GiB of swap only after checking that at least 80 GiB of disk is free, leaving
+  at least 64 GiB for the build. The private runner's earlier swap retry exhausted its much smaller disk.
+  `/mnt` shares the root filesystem on the observed runner, so moving files there would not add capacity.
+  Final resource and kernel logs help distinguish memory exhaustion from disk exhaustion on future retries.
   Set `posthog_only=true` to retry just that image, using `posthog_ref` to pin the original source commit.
 
 ## Secret
