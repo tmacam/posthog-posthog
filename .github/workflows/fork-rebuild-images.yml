@@ -142,16 +142,13 @@ jobs:
       - uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
-      - name: Add swap for frontend compilation
+      - name: Report build resources
         run: |
           set -euo pipefail
+          nproc
           free -h
-          df -h /
-          sudo fallocate -l 16G /posthog-build.swap
-          sudo chmod 600 /posthog-build.swap
-          sudo mkswap /posthog-build.swap
-          sudo swapon /posthog-build.swap
-          free -h
+          df -hT / /mnt
+          docker info --format 'Docker root directory: {{ .DockerRootDir }}'
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.sha }}

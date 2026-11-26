@@ -30,8 +30,10 @@ branch. This keeps fork automation separate from upstream data, so syncing never
   | `ghcr.io/posthog/posthog/livestream` | `livestream/Dockerfile` | `livestream` |
 
   Default is amd64 only on standard hosted runners. Upstream builds multi-arch on Depot.
-  The main PostHog build adds 16 GiB of swap and serializes BuildKit stages after the first POC run
-  exhausted memory during frontend compilation. This may be slower; it is not a substitute for a larger runner.
+  This repository is public to use the larger standard public-repository runners (4 vCPU, 16 GB RAM).
+  The main PostHog build serializes BuildKit stages and reports runner resources after disk cleanup.
+  It no longer allocates 16 GiB of swap on the root disk: the previous retry exhausted disk space.
+  Moving swap or Docker storage to `/mnt` would only help if it is a separate disk with sufficient capacity.
   Set `posthog_only=true` to retry just that image, using `posthog_ref` to pin the original source commit.
 
 ## Secret
