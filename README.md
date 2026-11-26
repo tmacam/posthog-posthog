@@ -30,6 +30,9 @@ branch. This keeps fork automation separate from upstream data, so syncing never
   | `ghcr.io/posthog/posthog/livestream` | `livestream/Dockerfile` | `livestream` |
 
   Default is amd64 only on standard hosted runners. Upstream builds multi-arch on Depot.
+  The main PostHog build adds 16 GiB of swap and serializes BuildKit stages after the first POC run
+  exhausted memory during frontend compilation. This may be slower; it is not a substitute for a larger runner.
+  Set `posthog_only=true` to retry just that image, using `posthog_ref` to pin the original source commit.
 
 ## Secret
 
